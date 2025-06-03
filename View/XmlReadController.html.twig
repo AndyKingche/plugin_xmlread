@@ -234,6 +234,12 @@
                 
                 $('table tbody tr').each(function() {
                     const row = $(this);
+                    
+                    // Si la fila está marcada como eliminada, no la incluimos
+                    if (row.hasClass('deleted')) {
+                        return;
+                    }
+                    
                     const select = row.find('.product-select');
                     const isFromSelect = select.val() !== null && select.val() !== '';
                     
@@ -319,10 +325,23 @@
             });
 
             // Eliminar fila
-            $('.delete-row').click(function() {
+            $(document).on('click', '.delete-row', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                
                 if (confirm('¿Está seguro de que desea eliminar esta fila?')) {
-                    $(this).closest('tr').remove();
-                    // Actualizar la caché después de eliminar la fila
+                    const row = $(this).closest('tr');
+                    
+                    // Marcar la fila como eliminada antes de removerla
+                    row.addClass('deleted');
+                    
+                    // Remover la fila
+                    row.remove();
+                    
+                    // Actualizar los totales de la tabla
+                    updateTableTotals();
+                    
+                    // Actualizar la caché con los datos modificados
                     updateCache();
                 }
             });
@@ -336,6 +355,12 @@
                 
                 $('table tbody tr').each(function() {
                     const row = $(this);
+                    
+                    // Si la fila está marcada como eliminada, no la incluimos
+                    if (row.hasClass('deleted')) {
+                        return;
+                    }
+                    
                     const select = row.find('.product-select');
                     const isFromSelect = select.val() !== null && select.val() !== '';
                     
