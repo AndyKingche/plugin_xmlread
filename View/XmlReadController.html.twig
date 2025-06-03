@@ -191,10 +191,16 @@
                 </div>
             </div>
             <div class="card-footer text-right">
-                <button class="btn btn-success">
-                    <i class="fas fa-save"></i> Guardar Cambios
-                </button>
-            </div>
+    <form method="post" action="{{ asset('XmlReadController') }}">
+        <input type="hidden" name="action" value="save-products"/>
+        {{ formToken() }}
+        <button class="btn btn-success" type="submit">
+            <i class="fas fa-save"></i> Guardar productos
+        </button>
+    </form>
+</div>
+
+
         </div>
     </div>
 </div>

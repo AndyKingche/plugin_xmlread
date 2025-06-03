@@ -2,7 +2,14 @@
 namespace FacturaScripts\Plugins\xml_read\Controller;
 
 use FacturaScripts\Core\Base\Controller;
+use FacturaScripts\Core\Lib\ExtendedController\EditController;
 use Symfony\Component\HttpFoundation\File\UploadedFile;
+use FacturaScripts\Core\Model\Producto;
+use FacturaScripts\Core\Base\DataBase\DataBaseWhere;
+use FacturaScripts\Core\Lib\ExtendedController\PanelController;
+use FacturaScripts\Core\Lib\ExtendedController\ProductImagesTrait;
+use FacturaScripts\Core\Lib\ExtendedController\DocFilesTrait;
+use FacturaScripts\Core\Cache;
 
 class XmlReadController extends Controller
 {
@@ -10,10 +17,21 @@ class XmlReadController extends Controller
     public $detallesData;
     public $showTable = false;
 
+    protected function createViews()
+    {
+        $this->createViewsStock();
+    }
+
+
+        public function getModelClassName(): string
+    {
+        return 'Producto';
+    }
+
     public function getPageData(): array
     {
         $pageData = parent::getPageData();
-        $pageData['menu'] = 'admin';
+        $pageData['menu'] = 'purchases';
         $pageData['title'] = 'Xml Read';
         $pageData['name'] = 'XmlReadController';
         $pageData['icon'] = 'fas fa-file-alt';
@@ -42,6 +60,10 @@ class XmlReadController extends Controller
 
             case 'generate-table':
                 $this->generateTableAction();
+                break;
+
+            case 'save-products':
+                $this->saveProductsAction();
                 break;
 
             default:
@@ -77,7 +99,6 @@ class XmlReadController extends Controller
                 throw new \Exception('No se pudo leer el archivo XML.');
             }
 
-            // Convertir a UTF-8
             $xmlContent = mb_convert_encoding($xmlContent, 'UTF-8', 'auto');
             $this->toolBox()->log()->info("Contenido XML cargado: " . substr($xmlContent, 0, 500));
 
@@ -95,19 +116,35 @@ class XmlReadController extends Controller
     {
         if (!is_array($this->jsonData)) {
             $this->toolBox()->i18nLog()->error('No se pudo procesar el XML.');
+            $this->toolBox()->log()->error('jsonData no es un array: ' . print_r($this->jsonData, true));
+            return;
+        }
+
+        $this->toolBox()->log()->info("Procesando jsonData: " . json_encode($this->jsonData));
+        
+        if (!isset($this->jsonData['detalles'])) {
+            $this->toolBox()->log()->error('No se encontró la sección detalles en jsonData');
             return;
         }
 
         $this->detallesData = $this->jsonData['detalles']['detalle'] ?? [];
+        $this->toolBox()->log()->info("Detalles procesados: " . json_encode($this->detallesData));
 
         if (isset($this->detallesData['codigoPrincipal'])) {
             $this->detallesData = [$this->detallesData];
+            $this->toolBox()->log()->info("Detalles convertidos a array: " . json_encode($this->detallesData));
         }
+
+        // Guardar los detalles en la caché usando el nuevo método
+        Cache::set('xml_detalles', $this->detallesData);
     }
 
     protected function generateTableAction()
     {
         $this->showTable = true;
+        // Recuperar los detalles de la caché usando el nuevo método
+        $this->detallesData = Cache::get('xml_detalles', []);
+        $this->toolBox()->log()->info("Generando tabla con datos de caché: " . json_encode($this->detallesData));
     }
 
     protected function procesarFactura(string $xmlContent): array
@@ -124,22 +161,27 @@ class XmlReadController extends Controller
             throw new \Exception('Archivo XML inválido.');
         }
 
-        // 1. Comprobante directo tipo <factura>
+        $this->toolBox()->log()->info("XML procesado correctamente. Nombre del nodo raíz: " . $xml->getName());
+
         if ($xml->getName() === 'factura') {
-            return $this->mapFacturaDirecta($xml);
+            $data = $this->mapFacturaDirecta($xml);
+            $this->toolBox()->log()->info("Factura directa mapeada: " . json_encode($data));
+            return $data;
         }
 
-        // 2. Comprobante dentro de SOAP
         if (isset($xml->Body->respuestaAutorizacionComprobante->autorizaciones->autorizacion)) {
-            return $this->mapFacturaSoap($xml->Body->respuestaAutorizacionComprobante->autorizaciones->autorizacion);
+            $data = $this->mapFacturaSoap($xml->Body->respuestaAutorizacionComprobante->autorizaciones->autorizacion);
+            $this->toolBox()->log()->info("Factura SOAP mapeada: " . json_encode($data));
+            return $data;
         }
 
-        // 3. Comprobante envuelto
         if (!isset($xml->comprobante)) {
             throw new \Exception('El XML no contiene la etiqueta <comprobante>.');
         }
 
-        return $this->mapFacturaEnvueltaxml($xml);
+        $data = $this->mapFacturaEnvueltaxml($xml);
+        $this->toolBox()->log()->info("Factura envuelta mapeada: " . json_encode($data));
+        return $data;
     }
 
     protected function mapFacturaDirecta($xml): array
@@ -224,4 +266,68 @@ class XmlReadController extends Controller
         }
         return $array;
     }
+
+    protected function saveProductsAction()
+    {
+        if (!$this->validateFormToken()) {
+            return;
+        }
+
+        $this->toolBox()->log()->info("Iniciando saveProductsAction");
+        
+        // Recuperar los detalles de la caché usando el nuevo método
+        $this->detallesData = Cache::get('xml_detalles', []);
+        $this->toolBox()->log()->info("Estado actual de detallesData desde caché: " . json_encode($this->detallesData));
+
+        if (empty($this->detallesData)) {
+            $this->toolBox()->i18nLog()->error('No hay productos para guardar.');
+            $this->toolBox()->log()->error('detallesData está vacío');
+            return;
+        }
+
+        $savedCount = 0;
+        $updatedCount = 0;
+
+        foreach ($this->detallesData as $item) {
+            $ref = $item['codigoPrincipal'] ?? '';
+            $desc = $item['descripcion'] ?? '';
+            $price = floatval($item['precioUnitario'] ?? 0);
+            $cantidad = floatval($item['cantidad'] ?? 0);
+
+            if (empty($ref) || empty($desc) || $price <= 0 || $cantidad <= 0) {
+                continue;
+            }
+
+            // Verificar si ya existe usando DataBaseWhere correctamente
+            $where = [new DataBaseWhere('referencia', $ref)];
+            $productosExistentes = Producto::all($where);
+
+            if (!empty($productosExistentes)) {
+                /** @var Producto $producto */
+                $producto = $productosExistentes[0];
+                $producto->stockfis = floatval($producto->stockfis) + $cantidad;
+
+                if ($producto->save()) {
+                    $updatedCount++;
+                    $this->toolBox()->log()->info("Producto actualizado: {$ref} (+{$cantidad} stock).");
+                }
+                continue;
+            }
+
+            // Nuevo producto
+            $producto = new Producto();
+            $producto->referencia = $ref;
+            $producto->descripcion = $desc;
+            $producto->pvpsiva = $price;
+            $producto->stockfis = $cantidad;
+
+            if ($producto->save()) {
+                $savedCount++;
+                $this->toolBox()->log()->info("Producto nuevo guardado: {$ref} ({$cantidad} stock).");
+            }
+        }
+
+        $this->toolBox()->i18nLog()->info("Se guardaron {$savedCount} productos nuevos y se actualizaron {$updatedCount} productos existentes.");
+    }
+
 }
