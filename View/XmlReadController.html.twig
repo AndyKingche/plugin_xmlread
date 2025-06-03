@@ -2,6 +2,7 @@
 
 {% block css %}
     {{ parent() }}
+    <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
     <style>
         .json-container {
             background: #f5f5f5;
@@ -21,13 +22,292 @@
         .table-detalles th {
             background-color: #f8f9fa;
         }
+        .editable {
+            cursor: pointer;
+            position: relative;
+        }
+        .editable:hover {
+            background-color: #f0f0f0;
+        }
+        .editable.editing {
+            background-color: #fff;
+            padding: 0;
+        }
+        .editable input {
+            width: 100%;
+            height: 100%;
+            border: 1px solid #007bff;
+            padding: 4px;
+        }
+        .delete-row {
+            color: #dc3545;
+            cursor: pointer;
+        }
+        .delete-row:hover {
+            color: #bd2130;
+        }
+        .modified {
+            background-color: #fff3cd;
+        }
+        .select2-container {
+            width: 100% !important;
+        }
+        .product-select {
+            width: 100%;
+        }
     </style>
 {% endblock %}
 
 {% block javascripts %}
     {{ parent() }}
+    <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
     <script>
         $(document).ready(function() {
+            // Inicializar Select2 en todos los selects de productos
+            $('.product-select').select2({
+                theme: 'bootstrap4',
+                placeholder: 'Buscar producto...',
+                allowClear: true,
+                ajax: {
+                    url: '{{ asset("XmlReadController") }}',
+                    dataType: 'json',
+                    delay: 250,
+                    data: function(params) {
+                        return {
+                            action: 'search-products',
+                            term: params.term,
+                            page: params.page || 1
+                        };
+                    },
+                    processResults: function(data, params) {
+                        console.log('Respuesta recibida:', data);
+                        
+                        if (data.error) {
+                            console.error('Error en la búsqueda:', data.message);
+                            return {
+                                results: [],
+                                pagination: {
+                                    more: false
+                                }
+                            };
+                        }
+
+                        if (!data.items) {
+                            console.error('Formato de respuesta inválido:', data);
+                            return {
+                                results: [],
+                                pagination: {
+                                    more: false
+                                }
+                            };
+                        }
+
+                        return {
+                            results: data.items,
+                            pagination: {
+                                more: data.more
+                            }
+                        };
+                    },
+                    cache: true,
+                    error: function(xhr, status, error) {
+                        console.error('Error en la petición AJAX:', {
+                            status: status,
+                            error: error,
+                            response: xhr.responseText
+                        });
+                    }
+                },
+                minimumInputLength: 2,
+                templateResult: formatProduct,
+                templateSelection: formatProductSelection,
+                language: {
+                    errorLoading: function() {
+                        return 'No se pudieron cargar los resultados.';
+                    },
+                    searching: function() {
+                        return 'Buscando...';
+                    },
+                    noResults: function() {
+                        return 'No se encontraron resultados';
+                    },
+                    loadingMore: function() {
+                        return 'Cargando más resultados...';
+                    }
+                }
+            });
+
+            // Formatear el resultado de la búsqueda
+            function formatProduct(product) {
+                if (product.loading) {
+                    return product.text;
+                }
+                return $('<span>' + product.referencia + ' - ' + product.descripcion + '</span>');
+            }
+
+            // Formatear la selección
+            function formatProductSelection(product) {
+                return product.referencia ? product.referencia + ' - ' + product.descripcion : product.text;
+            }
+
+            // Hacer las celdas editables
+            $('.editable').click(function() {
+                if (!$(this).hasClass('editing')) {
+                    const currentValue = $(this).text().trim();
+                    const input = $('<input>')
+                        .val(currentValue)
+                        .addClass('form-control');
+                    
+                    $(this).html(input);
+                    $(this).addClass('editing');
+                    input.focus();
+
+                    input.blur(function() {
+                        const newValue = $(this).val();
+                        const cell = $(this).parent();
+                        cell.removeClass('editing');
+                        cell.html(newValue);
+                        
+                        // Marcar como modificado
+                        if (newValue !== currentValue) {
+                            cell.addClass('modified');
+                            cell.closest('tr').addClass('modified');
+                            
+                            // Si se modificó la referencia o descripción, limpiar el select
+                            const columnIndex = cell.index();
+                            if (columnIndex === 1 || columnIndex === 2) {
+                                const select = cell.closest('tr').find('.product-select');
+                                select.val(null).trigger('change');
+                            }
+
+                            // Actualizar la caché con los datos modificados
+                            updateCache();
+                        }
+                    });
+
+                    input.keypress(function(e) {
+                        if (e.which === 13) {
+                            $(this).blur();
+                        }
+                    });
+                }
+            });
+
+            // Cuando se selecciona un producto
+            $('.product-select').on('select2:select', function(e) {
+                const row = $(this).closest('tr');
+                const data = e.params.data;
+                
+                // Guardar los valores originales
+                const cantidadOriginal = parseFloat(row.find('td:eq(3)').text().trim());
+                const precioUnitarioOriginal = parseFloat(row.find('td:eq(4)').text().replace(/[^0-9.-]+/g, ''));
+                const descuentoOriginal = parseFloat(row.find('td:eq(5)').text().replace(/[^0-9.-]+/g, ''));
+                const subtotalOriginal = parseFloat(row.find('td:eq(6)').text().replace(/[^0-9.-]+/g, ''));
+                const ivaOriginal = parseFloat(row.find('td:eq(7)').text().replace(/[^0-9.-]+/g, ''));
+                const totalOriginal = parseFloat(row.find('td:eq(8)').text().replace(/[^0-9.-]+/g, ''));
+                
+                // Actualizar solo el código principal y la descripción
+                row.find('td:eq(1)').text(data.referencia); // Código Principal
+                row.find('td:eq(2)').text(data.descripcion); // Descripción
+                
+                // Restaurar los valores originales
+                row.find('td:eq(3)').text(cantidadOriginal); // Cantidad
+                row.find('td:eq(4)').text('$' + precioUnitarioOriginal.toFixed(2)); // Precio Unitario
+                row.find('td:eq(5)').text('$' + descuentoOriginal.toFixed(2)); // Descuento
+                row.find('td:eq(6)').text('$' + subtotalOriginal.toFixed(2)); // Subtotal
+                row.find('td:eq(7)').text('$' + ivaOriginal.toFixed(2)); // IVA
+                row.find('td:eq(8)').text('$' + totalOriginal.toFixed(2)); // Total
+                
+                // Guardar la referencia seleccionada en un atributo data
+                row.attr('data-selected-reference', data.referencia);
+                
+                // Marcar la fila como modificada
+                row.addClass('modified');
+
+                // Actualizar la caché con los datos modificados
+                updateCache();
+            });
+
+            // Función para actualizar la caché
+            function updateCache() {
+                const modifiedData = [];
+                
+                $('table tbody tr').each(function() {
+                    const row = $(this);
+                    const select = row.find('.product-select');
+                    const isFromSelect = select.val() !== null && select.val() !== '';
+                    
+                    // Obtener el código original de la fila
+                    const codigoOriginal = row.find('td:eq(1)').text().trim();
+                    
+                    // Obtener el código principal, priorizando el seleccionado si existe
+                    const codigoPrincipal = isFromSelect ? row.attr('data-selected-reference') : codigoOriginal;
+                    
+                    // Obtener los valores de las celdas, eliminando el símbolo $ y cualquier espacio
+                    const cantidad = parseFloat(row.find('td:eq(3)').text().trim());
+                    const precioUnitario = parseFloat(row.find('td:eq(4)').text().replace(/[^0-9.-]+/g, ''));
+                    const descuento = parseFloat(row.find('td:eq(5)').text().replace(/[^0-9.-]+/g, ''));
+                    const subtotal = parseFloat(row.find('td:eq(6)').text().replace(/[^0-9.-]+/g, ''));
+                    const iva = parseFloat(row.find('td:eq(7)').text().replace(/[^0-9.-]+/g, ''));
+                    
+                    const item = {
+                        codigoPrincipal: codigoPrincipal,
+                        codigoOriginal: codigoOriginal,
+                        descripcion: row.find('td:eq(2)').text().trim(),
+                        cantidad: cantidad,
+                        precioUnitario: precioUnitario,
+                        descuento: descuento,
+                        precioTotalSinImpuesto: subtotal,
+                        impuestos: {
+                            impuesto: {
+                                valor: iva
+                            }
+                        },
+                        fromSelect: isFromSelect
+                    };
+                    modifiedData.push(item);
+                });
+
+                // Enviar los datos modificados al servidor
+                $.ajax({
+                    url: '?action=update-table',
+                    method: 'POST',
+                    data: {
+                        action: 'update-table',
+                        token: $('input[name="token"]').val(),
+                        modifiedData: JSON.stringify(modifiedData)
+                    },
+                    success: function(response) {
+                        console.log('Caché actualizada correctamente');
+                    },
+                    error: function() {
+                        console.error('Error al actualizar la caché');
+                    }
+                });
+            }
+
+            // Función para actualizar los totales de la tabla
+            function updateTableTotals() {
+                let subtotalSum = 0;
+                let ivaSum = 0;
+                let totalSum = 0;
+
+                $('table tbody tr').each(function() {
+                    const row = $(this);
+                    const subtotal = parseFloat(row.find('td:eq(6)').text().replace(/[^0-9.-]+/g, ''));
+                    const iva = parseFloat(row.find('td:eq(7)').text().replace(/[^0-9.-]+/g, ''));
+                    const total = parseFloat(row.find('td:eq(8)').text().replace(/[^0-9.-]+/g, ''));
+
+                    subtotalSum += isNaN(subtotal) ? 0 : subtotal;
+                    ivaSum += isNaN(iva) ? 0 : iva;
+                    totalSum += isNaN(total) ? 0 : total;
+                });
+
+                $('table tfoot th:eq(0)').text('$' + subtotalSum.toFixed(2));
+                $('table tfoot th:eq(1)').text('$' + ivaSum.toFixed(2));
+                $('table tfoot th:eq(2)').text('$' + totalSum.toFixed(2));
+            }
+
             // Botón para copiar JSON
             $('#copy-json').click(function() {
                 const jsonText = $('#json-output').text();
@@ -36,6 +316,69 @@
                 }, function() {
                     alert('Error al copiar');
                 });
+            });
+
+            // Eliminar fila
+            $('.delete-row').click(function() {
+                if (confirm('¿Está seguro de que desea eliminar esta fila?')) {
+                    $(this).closest('tr').remove();
+                    // Actualizar la caché después de eliminar la fila
+                    updateCache();
+                }
+            });
+
+            // Cuando se envía el formulario
+            $('form').on('submit', function(e) {
+                e.preventDefault();
+                
+                // Obtener los datos actuales de la tabla
+                const modifiedData = [];
+                
+                $('table tbody tr').each(function() {
+                    const row = $(this);
+                    const select = row.find('.product-select');
+                    const isFromSelect = select.val() !== null && select.val() !== '';
+                    
+                    // Obtener el código original de la fila
+                    const codigoOriginal = row.find('td:eq(1)').text().trim();
+                    
+                    // Obtener el código principal, priorizando el seleccionado si existe
+                    const codigoPrincipal = isFromSelect ? row.attr('data-selected-reference') : codigoOriginal;
+                    
+                    // Obtener los valores de las celdas, eliminando el símbolo $ y cualquier espacio
+                    const cantidad = parseFloat(row.find('td:eq(3)').text().trim());
+                    const precioUnitario = parseFloat(row.find('td:eq(4)').text().replace(/[^0-9.-]+/g, ''));
+                    const descuento = parseFloat(row.find('td:eq(5)').text().replace(/[^0-9.-]+/g, ''));
+                    const subtotal = parseFloat(row.find('td:eq(6)').text().replace(/[^0-9.-]+/g, ''));
+                    const iva = parseFloat(row.find('td:eq(7)').text().replace(/[^0-9.-]+/g, ''));
+                    
+                    const item = {
+                        codigoPrincipal: codigoPrincipal,
+                        codigoOriginal: codigoOriginal,
+                        descripcion: row.find('td:eq(2)').text().trim(),
+                        cantidad: cantidad,
+                        precioUnitario: precioUnitario,
+                        descuento: descuento,
+                        precioTotalSinImpuesto: subtotal,
+                        impuestos: {
+                            impuesto: {
+                                valor: iva
+                            }
+                        },
+                        fromSelect: isFromSelect
+                    };
+                    modifiedData.push(item);
+                });
+
+                // Agregar los datos modificados al formulario
+                $('<input>')
+                    .attr('type', 'hidden')
+                    .attr('name', 'modifiedData')
+                    .val(JSON.stringify(modifiedData))
+                    .appendTo($(this));
+
+                // Enviar el formulario
+                this.submit();
             });
         });
     </script>
@@ -150,25 +493,35 @@
                                 <th width="12%">Subtotal</th>
                                 <th width="10%">IVA</th>
                                 <th width="10%">Total</th>
+                                <th width="10%">Producto</th>
+                                <th width="5%">Acción</th>
                             </tr>
                         </thead>
                         <tbody>
                             {% for item in fsc.detallesData %}
                             <tr>
                                 <td>{{ loop.index }}</td>
-                                <td>{{ item.codigoPrincipal }}</td>
-                                <td>
+                                <td class="editable">{{ item.codigoPrincipal }}</td>
+                                <td class="editable">
                                     <small>{{ item.descripcion }}</small>
                                 </td>
-                                <td class="text-center">{{ item.cantidad }}</td>
-                                <td class="text-right">${{ item.precioUnitario|number_format(2) }}</td>
-                                <td class="text-right">${{ item.descuento|number_format(2) }}</td>
-                                <td class="text-right">${{ item.precioTotalSinImpuesto|number_format(2) }}</td>
-                                <td class="text-right">
+                                <td class="editable text-center">{{ item.cantidad }}</td>
+                                <td class="editable text-right">${{ item.precioUnitario|number_format(2) }}</td>
+                                <td class="editable text-right">${{ item.descuento|number_format(2) }}</td>
+                                <td class="editable text-right">${{ item.precioTotalSinImpuesto|number_format(2) }}</td>
+                                <td class="editable text-right">
                                     ${{ item.impuestos.impuesto.valor|number_format(2) }}
                                 </td>
-                                <td class="text-right font-weight-bold">
+                                <td class="editable text-right font-weight-bold">
                                     ${{ (item.precioTotalSinImpuesto + item.impuestos.impuesto.valor)|number_format(2) }}
+                                </td>
+                                <td>
+                                    <select class="product-select">
+                                        <option></option>
+                                    </select>
+                                </td>
+                                <td class="text-center">
+                                    <i class="fas fa-trash delete-row"></i>
                                 </td>
                             </tr>
                             {% endfor %}
@@ -185,22 +538,21 @@
                                 <th class="text-right">
                                     ${{ fsc.jsonData.infoFactura.importeTotal|default(0)|number_format(2) }}
                                 </th>
+                                <th colspan="2"></th>
                             </tr>
                         </tfoot>
                     </table>
                 </div>
             </div>
             <div class="card-footer text-right">
-    <form method="post" action="{{ asset('XmlReadController') }}">
-        <input type="hidden" name="action" value="save-products"/>
-        {{ formToken() }}
-        <button class="btn btn-success" type="submit">
-            <i class="fas fa-save"></i> Guardar productos
-        </button>
-    </form>
-</div>
-
-
+                <form method="post" action="{{ asset('XmlReadController') }}" enctype="multipart/form-data">
+                    <input type="hidden" name="action" value="save-products"/>
+                    {{ formToken() }}
+                    <button class="btn btn-success" type="submit">
+                        <i class="fas fa-save"></i> Guardar productos
+                    </button>
+                </form>
+            </div>
         </div>
     </div>
 </div>

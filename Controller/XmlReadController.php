@@ -66,6 +66,18 @@ class XmlReadController extends Controller
                 $this->saveProductsAction();
                 break;
 
+            case 'search-products':
+                $this->searchProductsAction();
+                break;
+
+            case 'get-cached-data':
+                $this->getCachedDataAction();
+                break;
+
+            case 'update-table':
+                $this->updateTableAction();
+                break;
+
             default:
                 $this->indexAction();
                 break;
@@ -74,9 +86,14 @@ class XmlReadController extends Controller
 
     protected function indexAction()
     {
+        // Reiniciar todas las variables
         $this->jsonData = null;
         $this->detallesData = null;
         $this->showTable = false;
+        
+        // Limpiar la caché
+        Cache::delete('xml_detalles');
+        Cache::delete('xml_original_data');
     }
 
     protected function uploadAction()
@@ -84,6 +101,15 @@ class XmlReadController extends Controller
         if (!$this->validateFormToken()) {
             return;
         }
+
+        // Reiniciar todas las variables
+        $this->jsonData = null;
+        $this->detallesData = null;
+        $this->showTable = false;
+        
+        // Limpiar la caché
+        Cache::delete('xml_detalles');
+        Cache::delete('xml_original_data');
 
         /** @var UploadedFile $uploadFile */
         $uploadFile = $this->request->files->get('facturafile');
@@ -135,14 +161,16 @@ class XmlReadController extends Controller
             $this->toolBox()->log()->info("Detalles convertidos a array: " . json_encode($this->detallesData));
         }
 
-        // Guardar los detalles en la caché usando el nuevo método
+        // Guardar los datos originales en la caché
         Cache::set('xml_detalles', $this->detallesData);
+        Cache::set('xml_original_data', $this->detallesData);
+        $this->toolBox()->log()->info("Datos guardados en caché: " . json_encode($this->detallesData));
     }
 
     protected function generateTableAction()
     {
         $this->showTable = true;
-        // Recuperar los detalles de la caché usando el nuevo método
+        // Recuperar los detalles de la caché
         $this->detallesData = Cache::get('xml_detalles', []);
         $this->toolBox()->log()->info("Generando tabla con datos de caché: " . json_encode($this->detallesData));
     }
@@ -275,41 +303,82 @@ class XmlReadController extends Controller
 
         $this->toolBox()->log()->info("Iniciando saveProductsAction");
         
-        // Recuperar los detalles de la caché usando el nuevo método
-        $this->detallesData = Cache::get('xml_detalles', []);
-        $this->toolBox()->log()->info("Estado actual de detallesData desde caché: " . json_encode($this->detallesData));
-
-        if (empty($this->detallesData)) {
-            $this->toolBox()->i18nLog()->error('No hay productos para guardar.');
-            $this->toolBox()->log()->error('detallesData está vacío');
+        // Obtener datos modificados del formulario
+        $modifiedDataJson = $this->request->request->get('modifiedData', '[]');
+        $this->toolBox()->log()->info("Datos modificados recibidos (raw): " . $modifiedDataJson);
+        
+        $modifiedData = json_decode($modifiedDataJson, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            $this->toolBox()->log()->error("Error decodificando JSON: " . json_last_error_msg());
             return;
+        }
+
+        $this->toolBox()->log()->info("Datos modificados decodificados: " . json_encode($modifiedData));
+
+        // Si no hay datos modificados, intentar usar los datos de la caché
+        if (empty($modifiedData)) {
+            $this->detallesData = Cache::get('xml_detalles', []);
+            $this->toolBox()->log()->info("Usando datos de caché: " . json_encode($this->detallesData));
+            
+            if (empty($this->detallesData)) {
+                $this->toolBox()->i18nLog()->error('No hay productos para guardar.');
+                $this->toolBox()->log()->error('No hay datos para procesar');
+                return;
+            }
+        } else {
+            $this->detallesData = $modifiedData;
+            // Actualizar la caché con los datos modificados
+            Cache::set('xml_detalles', $modifiedData);
+            $this->toolBox()->log()->info("Datos modificados guardados en caché");
         }
 
         $savedCount = 0;
         $updatedCount = 0;
 
         foreach ($this->detallesData as $item) {
-            $ref = $item['codigoPrincipal'] ?? '';
+            $this->toolBox()->log()->info("Procesando item: " . json_encode($item));
+            
+            // Determinar qué código usar
+            $fromSelect = $item['fromSelect'] ?? false;
+            $ref = $fromSelect ? ($item['codigoPrincipal'] ?? '') : ($item['codigoOriginal'] ?? $item['codigoPrincipal'] ?? '');
             $desc = $item['descripcion'] ?? '';
             $price = floatval($item['precioUnitario'] ?? 0);
             $cantidad = floatval($item['cantidad'] ?? 0);
 
+            $this->toolBox()->log()->info("Datos extraídos - ref: {$ref}, desc: {$desc}, price: {$price}, cantidad: {$cantidad}, fromSelect: " . ($fromSelect ? 'true' : 'false'));
+
             if (empty($ref) || empty($desc) || $price <= 0 || $cantidad <= 0) {
+                $this->toolBox()->log()->warning("Item ignorado por datos inválidos: " . json_encode($item));
                 continue;
             }
 
-            // Verificar si ya existe usando DataBaseWhere correctamente
+            // Verificar si ya existe
             $where = [new DataBaseWhere('referencia', $ref)];
             $productosExistentes = Producto::all($where);
 
             if (!empty($productosExistentes)) {
                 /** @var Producto $producto */
                 $producto = $productosExistentes[0];
-                $producto->stockfis = floatval($producto->stockfis) + $cantidad;
-
-                if ($producto->save()) {
-                    $updatedCount++;
-                    $this->toolBox()->log()->info("Producto actualizado: {$ref} (+{$cantidad} stock).");
+                
+                // Si viene del select, actualizar todo
+                if ($fromSelect) {
+                    $producto->descripcion = $desc;
+                    $producto->pvpsiva = $price;
+                    $producto->pvp = $price * (1 + ($producto->iva / 100));
+                    $producto->stockfis = floatval($producto->stockfis) + $cantidad;
+                    
+                    if ($producto->save()) {
+                        $updatedCount++;
+                        $this->toolBox()->log()->info("Producto actualizado desde select: {$ref}");
+                    }
+                } else {
+                    // Si no viene del select, solo actualizar el stock
+                    $producto->stockfis = floatval($producto->stockfis) + $cantidad;
+                    
+                    if ($producto->save()) {
+                        $updatedCount++;
+                        $this->toolBox()->log()->info("Producto actualizado (solo stock): {$ref}");
+                    }
                 }
                 continue;
             }
@@ -318,16 +387,148 @@ class XmlReadController extends Controller
             $producto = new Producto();
             $producto->referencia = $ref;
             $producto->descripcion = $desc;
-            $producto->pvpsiva = $price;
             $producto->stockfis = $cantidad;
+            $producto->pvpsiva = $price;
+            $producto->pvp = $price * 1.12;
+            $producto->coste = $price;
+            $producto->preciocoste = $price;
+            $producto->margen = 0;
+            $producto->margenm = 0;
+            $producto->iva = 12;
 
             if ($producto->save()) {
                 $savedCount++;
-                $this->toolBox()->log()->info("Producto nuevo guardado: {$ref} ({$cantidad} stock).");
+                $this->toolBox()->log()->info("Producto nuevo guardado: {$ref}");
             }
         }
 
         $this->toolBox()->i18nLog()->info("Se guardaron {$savedCount} productos nuevos y se actualizaron {$updatedCount} productos existentes.");
+    }
+
+    protected function updateTableAction()
+    {
+        if (!$this->validateFormToken()) {
+            return;
+        }
+
+        $modifiedDataJson = $this->request->request->get('modifiedData', '[]');
+        $this->toolBox()->log()->info("Datos recibidos para actualizar caché: " . $modifiedDataJson);
+        
+        $modifiedData = json_decode($modifiedDataJson, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            $this->toolBox()->log()->error("Error decodificando JSON: " . json_last_error_msg());
+            return;
+        }
+
+        if (!empty($modifiedData)) {
+            // Actualizar los datos en memoria
+            $this->detallesData = $modifiedData;
+            
+            // Actualizar la caché con los datos modificados
+            Cache::set('xml_detalles', $modifiedData);
+            $this->toolBox()->log()->info("Caché actualizada con nuevos datos: " . json_encode($modifiedData));
+        }
+
+        // Limpiar cualquier salida anterior
+        ob_clean();
+        
+        // Establecer los headers correctos
+        header('Content-Type: application/json');
+        header('Cache-Control: no-cache, must-revalidate');
+        
+        // Enviar respuesta de éxito
+        echo json_encode(['success' => true]);
+        exit;
+    }
+
+    protected function searchProductsAction()
+    {
+        try {
+            $term = $this->request->get('term', '');
+            $page = $this->request->get('page', 1);
+            $limit = 10;
+            $offset = ($page - 1) * $limit;
+
+            $this->toolBox()->log()->info("Buscando productos con término: " . $term);
+
+            $where = [];
+            if (!empty($term)) {
+                // Buscar en referencia o descripción usando OR
+                $where[] = new DataBaseWhere('referencia', $term, 'LIKE');
+                $where[] = new DataBaseWhere('descripcion', $term, 'LIKE', 'OR');
+            }
+
+            $producto = new Producto();
+            $productos = $producto->all($where, ['referencia' => 'ASC'], $offset, $limit);
+            
+            $this->toolBox()->log()->info("Productos encontrados: " . count($productos));
+            
+            $results = [];
+            foreach ($productos as $item) {
+                $results[] = [
+                    'id' => $item->referencia,
+                    'referencia' => $item->referencia,
+                    'descripcion' => $item->descripcion,
+                    'pvpsiva' => $item->pvpsiva,
+                    'text' => $item->referencia . ' - ' . $item->descripcion
+                ];
+            }
+
+            $response = [
+                'items' => $results,
+                'more' => count($results) === $limit
+            ];
+
+            $this->toolBox()->log()->info("Enviando respuesta: " . json_encode($response));
+
+            // Limpiar cualquier salida anterior
+            ob_clean();
+            
+            // Establecer los headers correctos
+            header('Content-Type: application/json');
+            header('Cache-Control: no-cache, must-revalidate');
+            
+            // Enviar la respuesta
+            echo json_encode($response);
+            exit;
+        } catch (\Exception $e) {
+            $this->toolBox()->log()->error("Error en searchProductsAction: " . $e->getMessage());
+            
+            // Limpiar cualquier salida anterior
+            ob_clean();
+            
+            // Establecer los headers correctos
+            header('Content-Type: application/json');
+            header('Cache-Control: no-cache, must-revalidate');
+            
+            // Enviar la respuesta de error
+            echo json_encode([
+                'error' => true,
+                'message' => $e->getMessage()
+            ]);
+            exit;
+        }
+    }
+
+    protected function getCachedDataAction()
+    {
+        if (!$this->validateFormToken()) {
+            return;
+        }
+
+        $cachedData = Cache::get('xml_detalles', []);
+        $this->toolBox()->log()->info("Enviando datos en caché: " . json_encode($cachedData));
+
+        // Limpiar cualquier salida anterior
+        ob_clean();
+        
+        // Establecer los headers correctos
+        header('Content-Type: application/json');
+        header('Cache-Control: no-cache, must-revalidate');
+        
+        // Enviar la respuesta
+        echo json_encode($cachedData);
+        exit;
     }
 
 }
