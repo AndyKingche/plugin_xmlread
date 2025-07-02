@@ -178,8 +178,17 @@ class XmlReadController extends Controller
     Cache::set('xml_original_data', $this->jsonData);
     $this->toolBox()->log()->info("Datos guardados en caché: " . json_encode($this->detallesData));
 
-    // 👉 AÑADE ESTA LÍNEA
-    $this->saveFacturaProveedor($this->jsonData);
+    // Guardar automáticamente el proveedor si no existe
+    $infoTrib = $this->jsonData['infoTributaria'] ?? [];
+    $ruc = $infoTrib['ruc'] ?? null;
+    if ($ruc) {
+        $proveedores = \FacturaScripts\Core\Model\Proveedor::all([
+            new DataBaseWhere('cifnif', $ruc)
+        ]);
+        if (empty($proveedores)) {
+            $this->crearProveedorDesdeInfoTrib($infoTrib);
+        }
+    }
 }
 
 
@@ -743,6 +752,89 @@ public function saveFacturaProveedorAction(): void
         // Enviar la respuesta
         echo json_encode($cachedData);
         exit;
+    }
+
+    private function crearProveedorDesdeInfoTrib(array $infoTrib): void
+    {
+        $ruc = $infoTrib['ruc'] ?? null;
+        $razonSocial = $infoTrib['razonSocial'] ?? 'Proveedor XML';
+        if (!$ruc || !$razonSocial) {
+            $this->toolBox()->i18nLog()->error('Faltan datos clave para crear el proveedor.');
+            return;
+        }
+
+        // Verificar país
+        $pais = Pais::all([new DataBaseWhere('codpais', 'ECU')]);
+        if (!empty($pais)) {
+            $codpais = 'ECU';
+        } else {
+            $todosPaises = Pais::all();
+            if (!empty($todosPaises)) {
+                $codpais = $todosPaises[0]->codpais;
+            } else {
+                $this->toolBox()->i18nLog()->error('No hay países disponibles en la base de datos. No se puede crear el proveedor.');
+                return;
+            }
+        }
+
+        // Verificar forma de pago
+        $formapago = FormaPago::all([new DataBaseWhere('codpago', 'CONT')]);
+        if (!empty($formapago)) {
+            $codpago = 'CONT';
+        } else {
+            $todosPagos = FormaPago::all();
+            if (!empty($todosPagos)) {
+                $codpago = $todosPagos[0]->codpago;
+            } else {
+                $this->toolBox()->i18nLog()->error('No hay formas de pago disponibles en la base de datos. No se puede crear el proveedor.');
+                return;
+            }
+        }
+
+        // Verificar cuentas contables
+        $cuentaContable = Cuenta::all([new DataBaseWhere('codcuenta', '22010000')]);
+        if (!empty($cuentaContable)) {
+            $cuentacontable = '22010000';
+        } else {
+            $todasCuentas = Cuenta::all();
+            if (!empty($todasCuentas)) {
+                $cuentacontable = $todasCuentas[0]->codcuenta;
+            } else {
+                $this->toolBox()->i18nLog()->error('No hay cuentas contables disponibles en la base de datos. No se puede crear el proveedor.');
+                return;
+            }
+        }
+
+        $cuentaCompras = Cuenta::all([new DataBaseWhere('codcuenta', '60000000')]);
+        if (!empty($cuentaCompras)) {
+            $cuentacompras = '60000000';
+        } else {
+            $todasCuentas = Cuenta::all();
+            if (!empty($todasCuentas)) {
+                $cuentacompras = $todasCuentas[0]->codcuenta;
+            } else {
+                $this->toolBox()->i18nLog()->error('No hay cuentas contables disponibles en la base de datos. No se puede crear el proveedor.');
+                return;
+            }
+        }
+
+        $proveedor = new Proveedor();
+        $proveedor->codproveedor = strtoupper(substr('P' . bin2hex(random_bytes(4)), 0, 10));
+        $proveedor->nombre = $razonSocial;
+        $proveedor->cifnif = $ruc;
+        $proveedor->tipofactura = 'F1';
+        $proveedor->codpais = $codpais;
+        $proveedor->codpago = $codpago;
+        $proveedor->cuentacontable = $cuentacontable;
+        $proveedor->cuentacompras = $cuentacompras;
+        $proveedor->recargo = 0;
+        $proveedor->iva = 12;
+
+        if ($proveedor->save()) {
+            $this->toolBox()->i18nLog()->info("Proveedor creado automáticamente: $razonSocial ($ruc)");
+        } else {
+            $this->toolBox()->i18nLog()->error("No se pudo crear el proveedor automáticamente.");
+        }
     }
 
 }
