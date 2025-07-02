@@ -10,6 +10,13 @@ use FacturaScripts\Core\Lib\ExtendedController\PanelController;
 use FacturaScripts\Core\Lib\ExtendedController\ProductImagesTrait;
 use FacturaScripts\Core\Lib\ExtendedController\DocFilesTrait;
 use FacturaScripts\Core\Cache;
+use FacturaScripts\Core\Model\Proveedor;
+use FacturaScripts\Core\Model\FacturaProveedor;
+use FacturaScripts\Core\Model\Pais;
+use FacturaScripts\Core\Model\FormaPago;
+use FacturaScripts\Core\Model\Cuenta;
+use DateTime;
+use Exception;
 
 class XmlReadController extends Controller
 {
@@ -77,6 +84,11 @@ class XmlReadController extends Controller
             case 'update-table':
                 $this->updateTableAction();
                 break;
+                
+            case 'save-factura-proveedor':
+                $this->saveFacturaProveedorAction();
+                break;
+
 
             default:
                 $this->indexAction();
@@ -139,33 +151,37 @@ class XmlReadController extends Controller
     }
 
     protected function processAction()
-    {
-        if (!is_array($this->jsonData)) {
-            $this->toolBox()->i18nLog()->error('No se pudo procesar el XML.');
-            $this->toolBox()->log()->error('jsonData no es un array: ' . print_r($this->jsonData, true));
-            return;
-        }
-
-        $this->toolBox()->log()->info("Procesando jsonData: " . json_encode($this->jsonData));
-        
-        if (!isset($this->jsonData['detalles'])) {
-            $this->toolBox()->log()->error('No se encontró la sección detalles en jsonData');
-            return;
-        }
-
-        $this->detallesData = $this->jsonData['detalles']['detalle'] ?? [];
-        $this->toolBox()->log()->info("Detalles procesados: " . json_encode($this->detallesData));
-
-        if (isset($this->detallesData['codigoPrincipal'])) {
-            $this->detallesData = [$this->detallesData];
-            $this->toolBox()->log()->info("Detalles convertidos a array: " . json_encode($this->detallesData));
-        }
-
-        // Guardar los datos originales en la caché
-        Cache::set('xml_detalles', $this->detallesData);
-        Cache::set('xml_original_data', $this->detallesData);
-        $this->toolBox()->log()->info("Datos guardados en caché: " . json_encode($this->detallesData));
+{
+    if (!is_array($this->jsonData)) {
+        $this->toolBox()->i18nLog()->error('No se pudo procesar el XML.');
+        $this->toolBox()->log()->error('jsonData no es un array: ' . print_r($this->jsonData, true));
+        return;
     }
+
+    $this->toolBox()->log()->info("Procesando jsonData: " . json_encode($this->jsonData));
+    
+    if (!isset($this->jsonData['detalles'])) {
+        $this->toolBox()->log()->error('No se encontró la sección detalles en jsonData');
+        return;
+    }
+
+    $this->detallesData = $this->jsonData['detalles']['detalle'] ?? [];
+    $this->toolBox()->log()->info("Detalles procesados: " . json_encode($this->detallesData));
+
+    if (isset($this->detallesData['codigoPrincipal'])) {
+        $this->detallesData = [$this->detallesData];
+        $this->toolBox()->log()->info("Detalles convertidos a array: " . json_encode($this->detallesData));
+    }
+
+    Cache::set('xml_detalles', $this->detallesData);
+    // Guardar el JSON completo para proveedor/factura
+    Cache::set('xml_original_data', $this->jsonData);
+    $this->toolBox()->log()->info("Datos guardados en caché: " . json_encode($this->detallesData));
+
+    // 👉 AÑADE ESTA LÍNEA
+    $this->saveFacturaProveedor($this->jsonData);
+}
+
 
     protected function generateTableAction()
     {
@@ -294,6 +310,206 @@ class XmlReadController extends Controller
         }
         return $array;
     }
+    protected function saveFacturaProveedor(array $jsonData): void
+{
+    if (empty($jsonData['infoTributaria']) || empty($jsonData['infoFactura'])) {
+        $this->toolBox()->i18nLog()->error('Faltan datos de infoTributaria o infoFactura.');
+        return;
+    }
+
+    $infoTrib = $jsonData['infoTributaria'];
+    $infoFactura = $jsonData['infoFactura'];
+    $this->toolBox()->log()->info('infoTrib: ' . json_encode($infoTrib));
+    $this->toolBox()->log()->info('infoFactura: ' . json_encode($infoFactura));
+    $ruc = $infoTrib['ruc'] ?? null;
+    $razonSocial = $infoTrib['razonSocial'] ?? null;
+    $secuencial = $infoTrib['secuencial'] ?? null;
+
+    if (!$ruc || !$razonSocial || !$secuencial) {
+        $this->toolBox()->i18nLog()->error('Campos clave faltantes para guardar la factura.');
+        return;
+    }
+
+    // Verificar proveedor
+    $proveedores = Proveedor::all([
+        new DataBaseWhere('cifnif', $ruc)
+    ]);
+
+    // Inicializar variables para evitar warnings SIEMPRE
+    $codpais = null;
+    $codpago = null;
+    $cuentacontable = null;
+    $cuentacompras = null;
+
+    if (!empty($proveedores)) {
+        $proveedor = $proveedores[0];
+        // Si necesitas usar los valores aquí, asígnalos desde $proveedor:
+        $codpais = $proveedor->get('codpais');
+        $codpago = $proveedor->get('codpago');
+        $cuentacontable = $proveedor->get('cuentacontable');
+        $cuentacompras = $proveedor->get('cuentacompras');
+    } else {
+        // Verificar país
+        $pais = Pais::all([new DataBaseWhere('codpais', 'ECU')]);
+        if (!empty($pais)) {
+            $codpais = 'ECU';
+        } else {
+            $todosPaises = Pais::all();
+            if (!empty($todosPaises)) {
+                $codpais = $todosPaises[0]->codpais;
+            } else {
+                $this->toolBox()->i18nLog()->error('No hay países disponibles en la base de datos. No se puede crear el proveedor.');
+                return;
+            }
+        }
+
+        // Verificar forma de pago
+        $formapago = FormaPago::all([new DataBaseWhere('codpago', 'CONT')]);
+        if (!empty($formapago)) {
+            $codpago = 'CONT';
+        } else {
+            $todosPagos = FormaPago::all();
+            if (!empty($todosPagos)) {
+                $codpago = $todosPagos[0]->codpago;
+            } else {
+                $this->toolBox()->i18nLog()->error('No hay formas de pago disponibles en la base de datos. No se puede crear el proveedor.');
+                return;
+            }
+        }
+
+        // Verificar cuentas contables
+        $cuentaContable = Cuenta::all([new DataBaseWhere('codcuenta', '22010000')]);
+        if (!empty($cuentaContable)) {
+            $cuentacontable = '22010000';
+        } else {
+            $todasCuentas = Cuenta::all();
+            if (!empty($todasCuentas)) {
+                $cuentacontable = $todasCuentas[0]->codcuenta;
+            } else {
+                $this->toolBox()->i18nLog()->error('No hay cuentas contables disponibles en la base de datos. No se puede crear el proveedor.');
+                return;
+            }
+        }
+
+        $cuentaCompras = Cuenta::all([new DataBaseWhere('codcuenta', '60000000')]);
+        if (!empty($cuentaCompras)) {
+            $cuentacompras = '60000000';
+        } else {
+            $todasCuentas = Cuenta::all();
+            if (!empty($todasCuentas)) {
+                $cuentacompras = $todasCuentas[0]->codcuenta;
+            } else {
+                $this->toolBox()->i18nLog()->error('No hay cuentas contables disponibles en la base de datos. No se puede crear el proveedor.');
+                return;
+            }
+        }
+
+        // Solo crear el proveedor si todas las variables están definidas
+        if ($codpais === null || $codpago === null || $cuentacontable === null || $cuentacompras === null) {
+            $this->toolBox()->i18nLog()->error('Faltan datos obligatorios para crear el proveedor.');
+            return;
+        }
+
+        $proveedor = new Proveedor();
+        $proveedor->codproveedor = strtoupper(substr('P' . bin2hex(random_bytes(4)), 0, 10));
+        $proveedor->nombre = $razonSocial;
+        $proveedor->cifnif = $ruc;
+        $proveedor->tipofactura = 'F1';
+        $proveedor->codpais = $codpais;
+        $proveedor->codpago = $codpago;
+        $proveedor->cuentacontable = $cuentacontable;
+        $proveedor->cuentacompras = $cuentacompras;
+        $proveedor->recargo = 0;
+        $proveedor->iva = 12;
+
+        if (!$proveedor->save()) {
+            $this->toolBox()->i18nLog()->error("No se pudo crear el proveedor.");
+            $this->toolBox()->log()->info("codpais usado: $codpais, codpago usado: $codpago, cuentacontable usado: $cuentacontable, cuentacompras usado: $cuentacompras");
+            return;
+        }
+    }
+
+    //$numeroFactura = ($infoTrib['estab'] ?? '000') . '-' . ($infoTrib['ptoEmi'] ?? '000') . '-' . $secuencial;
+    $numeroFactura = $infoTrib['claveAcceso'];
+
+    $this->toolBox()->log()->info("numeroFactura: " . $numeroFactura);
+    // Verificar si ya existe la factura
+    $facturaExistente = FacturaProveedor::all([
+        new DataBaseWhere('observaciones', $numeroFactura.".xml"),
+        new DataBaseWhere('codproveedor', $proveedor->codproveedor)
+    ]);
+
+    if (!empty($facturaExistente)) {
+        $this->toolBox()->i18nLog()->info("La factura ya fue registrada: " . $numeroFactura);
+        return;
+    }
+    $this->toolBox()->log()->info("codproveedor: " . $proveedor->cifnif);
+    $this->toolBox()->log()->info("codproveedor: " . $proveedor->codproveedor);
+    $this->toolBox()->log()->info("total sin impuestos: " . $infoFactura['totalSinImpuestos']);
+    $this->toolBox()->log()->info("tipo de dato de totalSinImpuestos: " . gettype($infoFactura['totalSinImpuestos']));
+    $fechaOriginal = $infoFactura['fechaEmision'] ?? date('Y-m-d');
+
+    // Intenta crear un objeto DateTime desde la fecha original
+    try {
+        $fechaObj = new DateTime($fechaOriginal);
+        $fechaFormateada = $fechaObj->format('Y-m-d');
+    } catch (Exception $e) {
+        // Si falla, usa la fecha actual
+        $fechaFormateada = date('Y-m-d');
+    }
+
+    $this->toolBox()->log()->info("fecha emision: " . $fechaFormateada);
+
+    $factura = new FacturaProveedor();
+    $factura->cifnif = $ruc;
+    $factura->codalmacen = 'ALG';
+    $factura->coddivisa = 'USD';
+    $factura->codejercicio = '2025';
+    $factura->codpago = 'CONT';
+    $factura->codproveedor = $proveedor->codproveedor;
+    $factura->codserie = 'A';
+    $factura->dtopor1 = 0;
+    $factura->dtopor2 = 0;
+    $factura->editable = 1;
+    $factura->idempresa = 1;
+    $factura->idestado = 21;
+    $factura->fecha = $fechaFormateada;
+    //$factura->codigo = $numeroFactura;
+    $factura->nick = 'admin';
+    $factura->nombre = $proveedor->nombre;
+    $factura->numdocs = 0;
+    $factura->observaciones = $numeroFactura.".xml";
+    $factura->pagada = 1;
+
+    $this->toolBox()->log()->info('Factura a guardar: ' . json_encode($factura->toArray()));
+    $this->toolBox()->log()->info('Detalles: ' . json_encode($this->detallesData));
+
+    if ($factura->save()) {
+        $this->toolBox()->i18nLog()->info("Factura del proveedor guardada: " . $factura->numero);
+    } else {
+        $this->toolBox()->i18nLog()->error("No se pudo guardar la factura del proveedor.");
+    }
+
+    $this->toolBox()->log()->info("codpais usado: $codpais, codpago usado: $codpago, cuentacontable usado: $cuentacontable, cuentacompras usado: $cuentacompras");
+}
+
+public function saveFacturaProveedorAction(): void
+{
+    // Verificamos si hay datos cargados del XML
+    $jsonData = Cache::get('xml_original_data');
+
+    if (empty($jsonData)) {
+        $this->toolBox()->i18nLog()->error('No hay datos XML cargados en caché.');
+        return;
+    }
+
+    try {
+        $this->saveFacturaProveedor($jsonData);
+    } catch (\Throwable $e) {
+        $this->toolBox()->i18nLog()->error('Error al guardar proveedor/factura: ' . $e->getMessage());
+    }
+}
+
 
     protected function saveProductsAction()
     {
@@ -363,8 +579,7 @@ class XmlReadController extends Controller
                 // Si viene del select, actualizar todo
                 if ($fromSelect) {
                     $producto->descripcion = $desc;
-                    $producto->pvpsiva = $price;
-                    $producto->pvp = $price * (1 + ($producto->iva / 100));
+                    $producto->precio = $price;
                     $producto->stockfis = floatval($producto->stockfis) + $cantidad;
                     
                     if ($producto->save()) {
@@ -374,7 +589,6 @@ class XmlReadController extends Controller
                 } else {
                     // Si no viene del select, solo actualizar el stock
                     $producto->stockfis = floatval($producto->stockfis) + $cantidad;
-                    
                     if ($producto->save()) {
                         $updatedCount++;
                         $this->toolBox()->log()->info("Producto actualizado (solo stock): {$ref}");
@@ -388,7 +602,7 @@ class XmlReadController extends Controller
             $producto->referencia = $ref;
             $producto->descripcion = $desc;
             $producto->stockfis = $cantidad;
-            $producto->pvpsiva = $price;
+            $producto->precio = $price;
             $producto->pvp = $price * 1.12;
             $producto->coste = $price;
             $producto->preciocoste = $price;
@@ -440,7 +654,7 @@ class XmlReadController extends Controller
         echo json_encode(['success' => true]);
         exit;
     }
-
+    
     protected function searchProductsAction()
     {
         try {
