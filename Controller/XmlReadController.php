@@ -458,12 +458,19 @@ class XmlReadController extends Controller
     $this->toolBox()->log()->info("tipo de dato de totalSinImpuestos: " . gettype($infoFactura['totalSinImpuestos']));
     $fechaOriginal = $infoFactura['fechaEmision'] ?? date('Y-m-d');
 
-    // Intenta crear un objeto DateTime desde la fecha original
-    try {
-        $fechaObj = new DateTime($fechaOriginal);
+    // Parseo robusto de la fecha
+    if (preg_match('/^\d{2}\/\d{2}\/\d{4}$/', $fechaOriginal)) {
+        $fechaObj = DateTime::createFromFormat('d/m/Y', $fechaOriginal);
+    } else {
+        try {
+            $fechaObj = new DateTime($fechaOriginal);
+        } catch (Exception $e) {
+            $fechaObj = false;
+        }
+    }
+    if ($fechaObj && $fechaObj instanceof DateTime) {
         $fechaFormateada = $fechaObj->format('Y-m-d');
-    } catch (Exception $e) {
-        // Si falla, usa la fecha actual
+    } else {
         $fechaFormateada = date('Y-m-d');
     }
 
@@ -626,6 +633,17 @@ public function saveFacturaProveedorAction(): void
         }
 
         $this->toolBox()->i18nLog()->info("Se guardaron {$savedCount} productos nuevos y se actualizaron {$updatedCount} productos existentes.");
+
+        // Ejecutar también el guardado de la factura proveedor
+        $this->saveFacturaProveedorAction();
+
+        // Si la petición es AJAX, devolver JSON y no recargar la página
+        if ($this->request->isXmlHttpRequest() || $this->request->headers->get('X-Requested-With') === 'XMLHttpRequest') {
+            ob_clean();
+            header('Content-Type: application/json');
+            echo json_encode(['success' => true]);
+            exit;
+        }
     }
 
     protected function updateTableAction()
