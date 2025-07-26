@@ -15,6 +15,7 @@ use FacturaScripts\Core\Model\FacturaProveedor;
 use FacturaScripts\Core\Model\Pais;
 use FacturaScripts\Core\Model\FormaPago;
 use FacturaScripts\Core\Model\Cuenta;
+use FacturaScripts\Dinamic\Model\LineaFacturaProveedor as DinLineaFactura;
 use DateTime;
 use Exception;
 
@@ -496,17 +497,60 @@ class XmlReadController extends Controller
     $factura->numdocs = 0;
     $factura->observaciones = $numeroFactura.".xml";
     $factura->pagada = 1;
+    
 
     $this->toolBox()->log()->info('Factura a guardar: ' . json_encode($factura->toArray()));
     $this->toolBox()->log()->info('Detalles: ' . json_encode($this->detallesData));
 
+    // 1. Guardar la factura sin totales
     if ($factura->save()) {
         $this->toolBox()->i18nLog()->info("Factura del proveedor guardada: " . $factura->numero);
+        $this->toolBox()->log()->info('Detalles de la factura guardada: ' . json_encode($this->detallesData));
+
+        // 2. Guardar las líneas
+        foreach ($this->detallesData as $detalle) {
+            $this->toolBox()->log()->info("Guardando detalle: " . json_encode($detalle));
+            $codigo = $detalle['codigoPrincipal'] ?? '';
+            $productos = Producto::all([new DataBaseWhere('referencia', $codigo)]);
+            if (empty($productos)) {
+                $this->toolBox()->log()->warning("Producto no encontrado: " . $codigo);
+                continue;
+            }
+            $producto = $productos[0];
+
+            $linea = new DinLineaFactura();
+            $linea->idfactura = $factura->idfactura;
+            $linea->referencia = $codigo;
+            $linea->descripcion = $detalle['descripcion'] ?? $producto->descripcion;
+            $linea->cantidad = $detalle['cantidad'] ?? 1;
+            $linea->pvpunitario = $detalle['precioUnitario'] ?? $producto->precio;
+            $linea->pvptotal = ($linea->pvpunitario) * ($linea->cantidad);
+            $linea->iva = 15;
+            if ($linea->save()) {
+                $this->toolBox()->log()->info('Línea guardada: ' . json_encode($linea->toArray()));
+            } else {
+                $this->toolBox()->log()->error('Error al guardar línea: ' . json_encode($linea->toArray()));
+            }
+        }
+
+        // 3. Calcular y asignar los totales, luego guardar la factura nuevamente
+        $totalSinImpuestos = isset($infoFactura['totalSinImpuestos']) ? floatval($infoFactura['totalSinImpuestos']) : 0.0;
+        $totalIva = 0.0;
+        if (isset($infoFactura['totalConImpuestos']['totalImpuesto'][0]['valor'])) {
+            $totalIva = floatval($infoFactura['totalConImpuestos']['totalImpuesto'][0]['valor']);
+        }
+        $this->toolBox()->log()->info('Asignando totales: total=' . $totalSinImpuestos . ', totaliva=' . $totalIva);
+        $factura->total = $totalSinImpuestos;
+        $factura->totaliva = $totalIva;
+        if ($factura->save()) {
+            $this->toolBox()->log()->info('Totales actualizados en la factura.');
+        } else {
+            $this->toolBox()->log()->error('Error al actualizar los totales en la factura: ' . json_encode($factura->getErrors()));
+        }
     } else {
         $this->toolBox()->i18nLog()->error("No se pudo guardar la factura del proveedor.");
     }
 
-    $this->toolBox()->log()->info("codpais usado: $codpais, codpago usado: $codpago, cuentacontable usado: $cuentacontable, cuentacompras usado: $cuentacompras");
 }
 
 public function saveFacturaProveedorAction(): void
@@ -846,7 +890,7 @@ public function saveFacturaProveedorAction(): void
         $proveedor->cuentacontable = $cuentacontable;
         $proveedor->cuentacompras = $cuentacompras;
         $proveedor->recargo = 0;
-        $proveedor->iva = 12;
+        $proveedor->iva = 15;
 
         if ($proveedor->save()) {
             $this->toolBox()->i18nLog()->info("Proveedor creado automáticamente: $razonSocial ($ruc)");
