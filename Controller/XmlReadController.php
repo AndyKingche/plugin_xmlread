@@ -1,4 +1,38 @@
 <?php
+/*
+-----------------------------------------------------------------------------------
+ Plugin: XmlReadController
+-----------------------------------------------------------------------------------
+
+Este controlador forma parte de un plugin para FacturaScripts que permite importar facturas electrónicas en formato XML. El objetivo principal es automatizar el registro de compras, productos y proveedores a partir de la información contenida en los archivos XML generados por sistemas de facturación electrónica.
+
+Funcionamiento general:
+
+1. Subida y procesamiento de archivos XML:
+   - El usuario selecciona y sube un archivo XML de factura electrónica desde la interfaz.
+   - El sistema lee el archivo, lo convierte a formato UTF-8 y lo procesa para extraer la información relevante (proveedor, productos, totales, impuestos, etc.).
+   - Se valida que el XML contenga todos los datos necesarios para el registro.
+
+2. Registro automático de proveedores:
+   - Si el proveedor de la factura no existe en la base de datos, el sistema lo crea automáticamente usando los datos extraídos del XML.
+
+3. Visualización y edición de productos:
+   - Los productos de la factura se muestran en una tabla editable en la vista. El usuario puede modificar cantidades, precios, descripciones y asociar productos existentes del catálogo.
+   - Los cambios realizados en la vista se almacenan en un arreglo en caché (`xml_detalles`), permitiendo que los datos actualizados se utilicen al guardar la compra.
+
+4. Guardado de productos:
+   - Al guardar, el sistema recorre el arreglo de productos en caché. Si el producto existe, actualiza el stock y otros datos; si no existe, lo crea en la base de datos.
+
+5. Registro de la factura de proveedor:
+   - Se crea la factura en la base de datos, asociando los productos y el proveedor correspondiente.
+   - Se calculan y guardan los totales, el IVA y el importe final de la compra.
+
+6. Manejo de errores y validaciones:
+   - El sistema incluye validaciones robustas y mensajes claros para el usuario en caso de errores de datos, problemas de conexión o inconsistencias en el XML.
+
+Este plugin está diseñado para facilitar la gestión de compras y el control de inventario, reduciendo el trabajo manual y minimizando errores en el registro de información contable y de productos.
+-----------------------------------------------------------------------------------
+*/
 namespace FacturaScripts\Plugins\xml_read\Controller;
 
 use FacturaScripts\Core\Base\Controller;
@@ -21,21 +55,27 @@ use Exception;
 
 class XmlReadController extends Controller
 {
+    // jsonData almacena la información extraída del XML, incluyendo proveedor, productos y totales.
+    // detallesData contiene el arreglo de productos que se muestran y editan en la vista.
+    // showTable controla la visualización de la tabla de productos en la interfaz.
     public $jsonData;
     public $detallesData;
     public $showTable = false;
 
+    // Inicializa las vistas necesarias para el plugin.
     protected function createViews()
     {
         $this->createViewsStock();
     }
 
 
-        public function getModelClassName(): string
+    // Devuelve el nombre del modelo principal utilizado en el controlador (Producto).
+    public function getModelClassName(): string
     {
         return 'Producto';
     }
 
+    // Configura los datos de la página para la vista principal del plugin.
     public function getPageData(): array
     {
         $pageData = parent::getPageData();
@@ -47,12 +87,15 @@ class XmlReadController extends Controller
         return $pageData;
     }
 
+    // Método principal que gestiona el ciclo de vida privado del controlador y ejecuta la acción solicitada.
     public function privateCore(&$response, $user, $permissions)
     {
         parent::privateCore($response, $user, $permissions);
         $this->execAction();
     }
 
+    // Determina la acción a ejecutar según el parámetro recibido en la petición.
+    // Permite gestionar la subida, procesamiento, guardado y edición de datos.
     protected function execAction()
     {
         $action = $this->request->get('action', '');
@@ -61,86 +104,69 @@ class XmlReadController extends Controller
             case 'upload':
                 $this->uploadAction();
                 break;
-
             case 'process':
                 $this->processAction();
                 break;
-
             case 'generate-table':
                 $this->generateTableAction();
                 break;
-
             case 'save-products':
                 $this->saveProductsAction();
                 break;
-
             case 'search-products':
                 $this->searchProductsAction();
                 break;
-
             case 'get-cached-data':
                 $this->getCachedDataAction();
                 break;
-
             case 'update-table':
                 $this->updateTableAction();
                 break;
-                
             case 'save-factura-proveedor':
                 $this->saveFacturaProveedorAction();
                 break;
-
-
             default:
                 $this->indexAction();
                 break;
         }
     }
 
+    // Reinicia el estado del controlador y limpia la caché de productos y datos XML.
     protected function indexAction()
     {
-        // Reiniciar todas las variables
         $this->jsonData = null;
         $this->detallesData = null;
         $this->showTable = false;
-        
         // Limpiar la caché
         Cache::delete('xml_detalles');
         Cache::delete('xml_original_data');
     }
 
+    // Recibe el archivo XML subido por el usuario, lo procesa y extrae los datos necesarios.
+    // Si el archivo es válido, inicia el flujo de procesamiento y validación.
     protected function uploadAction()
     {
         if (!$this->validateFormToken()) {
             return;
         }
-
-        // Reiniciar todas las variables
         $this->jsonData = null;
         $this->detallesData = null;
         $this->showTable = false;
-        
-        // Limpiar la caché
         Cache::delete('xml_detalles');
         Cache::delete('xml_original_data');
-
         /** @var UploadedFile $uploadFile */
         $uploadFile = $this->request->files->get('facturafile');
         if (!$uploadFile instanceof UploadedFile) {
             $this->toolBox()->i18nLog()->warning('No se ha seleccionado ningún archivo.');
             return;
         }
-
         try {
             $xmlContent = file_get_contents($uploadFile->getPathname());
-
             if (!$xmlContent) {
                 throw new \Exception('No se pudo leer el archivo XML.');
             }
-
             $xmlContent = mb_convert_encoding($xmlContent, 'UTF-8', 'auto');
             $this->toolBox()->log()->info("Contenido XML cargado: " . substr($xmlContent, 0, 500));
-
             $this->jsonData = $this->procesarFactura($xmlContent);
             $this->validateJsonData($this->jsonData);
             $this->processAction();
@@ -151,56 +177,54 @@ class XmlReadController extends Controller
         }
     }
 
+    // Procesa los datos extraídos del XML, los valida y los almacena en caché.
+    // Si el proveedor no existe, lo crea automáticamente.
     protected function processAction()
-{
-    if (!is_array($this->jsonData)) {
-        $this->toolBox()->i18nLog()->error('No se pudo procesar el XML.');
-        $this->toolBox()->log()->error('jsonData no es un array: ' . print_r($this->jsonData, true));
-        return;
-    }
-
-    $this->toolBox()->log()->info("Procesando jsonData: " . json_encode($this->jsonData));
-    
-    if (!isset($this->jsonData['detalles'])) {
-        $this->toolBox()->log()->error('No se encontró la sección detalles en jsonData');
-        return;
-    }
-
-    $this->detallesData = $this->jsonData['detalles']['detalle'] ?? [];
-    $this->toolBox()->log()->info("Detalles procesados: " . json_encode($this->detallesData));
-
-    if (isset($this->detallesData['codigoPrincipal'])) {
-        $this->detallesData = [$this->detallesData];
-        $this->toolBox()->log()->info("Detalles convertidos a array: " . json_encode($this->detallesData));
-    }
-
-    Cache::set('xml_detalles', $this->detallesData);
-    // Guardar el JSON completo para proveedor/factura
-    Cache::set('xml_original_data', $this->jsonData);
-    $this->toolBox()->log()->info("Datos guardados en caché: " . json_encode($this->detallesData));
-
-    // Guardar automáticamente el proveedor si no existe
-    $infoTrib = $this->jsonData['infoTributaria'] ?? [];
-    $ruc = $infoTrib['ruc'] ?? null;
-    if ($ruc) {
-        $proveedores = \FacturaScripts\Core\Model\Proveedor::all([
-            new DataBaseWhere('cifnif', $ruc)
-        ]);
-        if (empty($proveedores)) {
-            $this->crearProveedorDesdeInfoTrib($infoTrib);
+    {
+        if (!is_array($this->jsonData)) {
+            $this->toolBox()->i18nLog()->error('No se pudo procesar el XML.');
+            $this->toolBox()->log()->error('jsonData no es un array: ' . print_r($this->jsonData, true));
+            return;
+        }
+        $this->toolBox()->log()->info("Procesando jsonData: " . json_encode($this->jsonData));
+        if (!isset($this->jsonData['detalles'])) {
+            $this->toolBox()->log()->error('No se encontró la sección detalles en jsonData');
+            return;
+        }
+        $this->detallesData = $this->jsonData['detalles']['detalle'] ?? [];
+        $this->toolBox()->log()->info("Detalles procesados: " . json_encode($this->detallesData));
+        if (isset($this->detallesData['codigoPrincipal'])) {
+            $this->detallesData = [$this->detallesData];
+            $this->toolBox()->log()->info("Detalles convertidos a array: " . json_encode($this->detallesData));
+        }
+        Cache::set('xml_detalles', $this->detallesData);
+        // Guardar el JSON completo para proveedor/factura
+        Cache::set('xml_original_data', $this->jsonData);
+        $this->toolBox()->log()->info("Datos guardados en caché: " . json_encode($this->detallesData));
+        // Guardar automáticamente el proveedor si no existe
+        $infoTrib = $this->jsonData['infoTributaria'] ?? [];
+        $ruc = $infoTrib['ruc'] ?? null;
+        if ($ruc) {
+            $proveedores = \FacturaScripts\Core\Model\Proveedor::all([
+                new DataBaseWhere('cifnif', $ruc)
+            ]);
+            if (empty($proveedores)) {
+                $this->crearProveedorDesdeInfoTrib($infoTrib);
+            }
         }
     }
-}
 
 
+    // Activa la visualización de la tabla de productos y recupera los datos desde la caché.
     protected function generateTableAction()
     {
         $this->showTable = true;
-        // Recuperar los detalles de la caché
         $this->detallesData = Cache::get('xml_detalles', []);
         $this->toolBox()->log()->info("Generando tabla con datos de caché: " . json_encode($this->detallesData));
     }
 
+    // Recibe el contenido XML y lo transforma en un arreglo asociativo con los datos relevantes.
+    // Soporta diferentes formatos de factura electrónica.
     protected function procesarFactura(string $xmlContent): array
     {
         libxml_clear_errors();
@@ -291,6 +315,7 @@ class XmlReadController extends Controller
         return $data;
     }
 
+    // Valida que el arreglo de datos extraído del XML contenga todos los campos obligatorios.
     protected function validateJsonData(array $data)
     {
         $required = [
@@ -320,6 +345,8 @@ class XmlReadController extends Controller
         }
         return $array;
     }
+    // Guarda la factura del proveedor, los productos y las líneas asociadas.
+    // Calcula los totales y el IVA, y actualiza la base de datos.
     protected function saveFacturaProveedor(array $jsonData): void
 {
     if (empty($jsonData['infoTributaria']) || empty($jsonData['infoFactura'])) {
@@ -567,7 +594,8 @@ class XmlReadController extends Controller
 
 }
 
-public function saveFacturaProveedorAction(): void
+    // Acción pública para guardar la factura del proveedor usando los datos en caché.
+    public function saveFacturaProveedorAction(): void
 {
     // Verificamos si hay datos cargados del XML
     $jsonData = Cache::get('xml_original_data');
@@ -585,6 +613,8 @@ public function saveFacturaProveedorAction(): void
 }
 
 
+    // Guarda los productos editados en la vista, actualiza el stock y crea nuevos productos si es necesario.
+    // También ejecuta el guardado de la factura proveedor.
     protected function saveProductsAction()
     {
         if (!$this->validateFormToken()) {
@@ -704,6 +734,7 @@ public function saveFacturaProveedorAction(): void
         }
     }
 
+    // Actualiza el arreglo en caché con los productos modificados desde la vista.
     protected function updateTableAction()
     {
         if (!$this->validateFormToken()) {
@@ -740,6 +771,7 @@ public function saveFacturaProveedorAction(): void
         exit;
     }
     
+    // Permite buscar productos existentes en la base de datos para asociarlos a los detalles de la factura.
     protected function searchProductsAction()
     {
         try {
@@ -809,6 +841,7 @@ public function saveFacturaProveedorAction(): void
         }
     }
 
+    // Devuelve los datos de productos almacenados en caché para su uso en la vista.
     protected function getCachedDataAction()
     {
         if (!$this->validateFormToken()) {
@@ -830,6 +863,7 @@ public function saveFacturaProveedorAction(): void
         exit;
     }
 
+    // Crea un proveedor nuevo en la base de datos usando los datos extraídos del XML si no existe previamente.
     private function crearProveedorDesdeInfoTrib(array $infoTrib): void
     {
         $ruc = $infoTrib['ruc'] ?? null;
