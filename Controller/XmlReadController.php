@@ -507,6 +507,10 @@ class XmlReadController extends Controller
         $this->toolBox()->i18nLog()->info("Factura del proveedor guardada: " . $factura->numero);
         $this->toolBox()->log()->info('Detalles de la factura guardada: ' . json_encode($this->detallesData));
 
+        $sumatotales = 0; // Total sin IVA
+        $totalIva = 0;     // Solo IVA
+        $totalConIva = 0;  // Total con IVA (tasa con IVA)
+
         // 2. Guardar las líneas
         foreach ($this->detallesData as $detalle) {
             $this->toolBox()->log()->info("Guardando detalle: " . json_encode($detalle));
@@ -525,28 +529,38 @@ class XmlReadController extends Controller
             $linea->cantidad = $detalle['cantidad'] ?? 1;
             $linea->pvpunitario = $detalle['precioUnitario'] ?? $producto->precio;
             $linea->pvptotal = ($linea->pvpunitario) * ($linea->cantidad);
+            $linea->codimpuesto = 'IVA15';
             $linea->iva = 15;
+
             if ($linea->save()) {
                 $this->toolBox()->log()->info('Línea guardada: ' . json_encode($linea->toArray()));
             } else {
                 $this->toolBox()->log()->error('Error al guardar línea: ' . json_encode($linea->toArray()));
             }
-        }
 
-        // 3. Calcular y asignar los totales, luego guardar la factura nuevamente
-        $totalSinImpuestos = isset($infoFactura['totalSinImpuestos']) ? floatval($infoFactura['totalSinImpuestos']) : 0.0;
-        $totalIva = 0.0;
-        if (isset($infoFactura['totalConImpuestos']['totalImpuesto'][0]['valor'])) {
-            $totalIva = floatval($infoFactura['totalConImpuestos']['totalImpuesto'][0]['valor']);
+            $sumatotales += $linea->pvptotal;
+            $ivaLinea = $linea->pvptotal * ($linea->iva / 100);
+            $totalIva += $ivaLinea;
+            $totalConIva += $linea->pvptotal + $ivaLinea;
         }
-        $this->toolBox()->log()->info('Asignando totales: total=' . $totalSinImpuestos . ', totaliva=' . $totalIva);
-        $factura->total = $totalSinImpuestos;
+        
+        $this->toolBox()->log()->info('Línea guardada: ' . $sumatotales . ', IVA: ' . $totalIva . ', Total con IVA: ' . $totalConIva);
+        
+        $factura->neto = $sumatotales;
+        $factura->netosindto = $sumatotales;
+        $factura->total = $totalConIva;
+        $factura->totaleuros = $totalConIva * 0.8855;
         $factura->totaliva = $totalIva;
-        if ($factura->save()) {
-            $this->toolBox()->log()->info('Totales actualizados en la factura.');
-        } else {
-            $this->toolBox()->log()->error('Error al actualizar los totales en la factura: ' . json_encode($factura->getErrors()));
-        }
+        $factura->totalrecargo = 0;
+        $factura->totalsuplidos = 0;
+        $factura->totalirpf = 0;
+        $factura->pagada = 1;
+        $factura->vencida = 0;
+        $factura->save();
+
+        $factura->pagada = 1;
+        $factura->save();
+
     } else {
         $this->toolBox()->i18nLog()->error("No se pudo guardar la factura del proveedor.");
     }
